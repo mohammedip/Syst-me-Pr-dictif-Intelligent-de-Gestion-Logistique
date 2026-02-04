@@ -1,0 +1,126 @@
+services:
+
+  # --------------------------------------------------------
+  # MongoDB
+  # --------------------------------------------------------
+  mongo:
+    image: mongo:6
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  # --------------------------------------------------------
+  # Airflow
+  # --------------------------------------------------------
+  airflow:
+    build: ./airflow
+    container_name: airflow
+    restart: always
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    ports:
+      - "8080:8080"
+    command: ["bash", "/opt/airflow/init-airflow.sh"]
+
+  # --------------------------------------------------------
+  # Streamlit + Spark runtime
+  # --------------------------------------------------------
+  streamlit:
+    build: .
+    container_name: streamlit_app
+    depends_on:
+      - mongo
+      - airflow
+    ports:
+      - "8501:8501"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      AIRFLOW_URL: http://airflow:8080/
+    volumes:
+      - ./app.py:/app/app.py
+      - ./models:/app/models
+
+  # --------------------------------------------------------
+  # FastAPI streaming server
+  # --------------------------------------------------------
+  fastapi_stream:
+    build:
+      context: ./fastapi_stream
+      dockerfile: fastapi.Dockerfile
+    container_name: fastapi_stream
+    ports:
+      - "8000:8000"
+    environment:
+      - CORS_ALLOW_ORIGINS=*
+    depends_on:
+      - mongo
+
+  # --------------------------------------------------------
+  # Bridge (WebSocket → TCP for Spark)
+  # --------------------------------------------------------
+  bridge:
+    build:
+      context: ./fastapi_stream
+      dockerfile: fastapi.Dockerfile
+    container_name: bridge_ws
+    command: ["python", "bridge_ws_to_tcp.py"]
+    depends_on:
+      - fastapi_stream
+    ports:
+      - "9009:9009"
+    environment:
+      - TCP_HOST=0.0.0.0
+      - TCP_PORT=9009
+      - WS_URL=ws://fastapi_stream:8000/ws/data
+
+  # --------------------------------------------------------
+  # PostgreSQL (optional)
+  # --------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dataco
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # --------------------------------------------------------
+  # Jupyter + Spark
+  # --------------------------------------------------------
+  jupyter:
+    build:
+      context: ./app/notebooks
+      dockerfile: jupyter.Dockerfile
+    container_name: jupyter_lab
+    depends_on:
+      - mongo
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      MONGO_URI: mongodb://mongo:27017
+      GRANT_SUDO: "yes"
+      JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+      SPARK_HOME: /usr/local/spark
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+    volumes:
+      - ./app/notebooks:/home/jovyan/work
+      - ./app/data:/home/jovyan/data
+
+# --------------------------------------------------------
+# VOLUMES
+# --------------------------------------------------------
+volumes:
+  mongo_data:
+  pgdata:
